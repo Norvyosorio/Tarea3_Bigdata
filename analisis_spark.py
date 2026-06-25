@@ -1,65 +1,99 @@
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
-# 1. Configuración de Sesión Optimizada
-spark = SparkSession.builder \
-    .appName('AnalisisSaludMentalPro') \
-    .config("spark.sql.shuffle.partitions", "10") \
-    .getOrCreate()
 
-# 2. Carga de Datos con Inferencia de Esquema
-file_path = 'hdfs://localhost:9000/Tarea3/student_mental_health_burnout_1M.csv'
-df_raw = spark.read.format('csv') \
-    .option('header', 'true') \
-    .option('inferSchema', 'true') \
-    .load(file_path)
+def create_spark_session(app_name='AnalisisSaludMentalPro', shuffle_partitions='10'):
+    """Create and return a configured SparkSession."""
+    return SparkSession.builder \
+        .appName(app_name) \
+        .config("spark.sql.shuffle.partitions", shuffle_partitions) \
+        .getOrCreate()
 
-# 3. Limpieza y Transformación (Casteo y Redondeo)
-# Redondeamos todos los floats a 2 decimales para que el .show() no sea un caos
-float_cols = [c for c, t in df_raw.dtypes if t == 'double']
-df_clean = df_raw.select([F.round(F.col(c), 2).alias(c) if c in float_cols else F.col(c) for c in df_raw.columns])
 
-# 4. Análisis de "High Performers vs High Burnout" (El Insight de Oro)
-# Queremos ver quiénes tienen notas altas pero están a punto de explotar
-print("\n>>> Top 10 Estudiantes con Alto Rendimiento y Mayor Burnout:")
-df_clean.filter((F.col('academic_performance') > 80) & (F.col('burnout_score') > 7)) \
-    .select('age', 'gender', 'academic_year', 'academic_performance', 'burnout_score', 'risk_level') \
-    .orderBy(F.col('burnout_score').desc()) \
-    .show(10)
+def load_data(spark, file_path):
+    """Load a CSV file into a Spark DataFrame with header and schema inference."""
+    return spark.read.format('csv') \
+        .option('header', 'true') \
+        .option('inferSchema', 'true') \
+        .load(file_path)
 
-# 5. Agregación Avanzada por Año Académico y Género
-# Calculamos promedios de salud mental y riesgo de deserción
-print("\n>>> Estadísticas de Bienestar por Año y Género:")
-stats_df = df_clean.groupBy('academic_year', 'gender') \
-    .agg(
-        F.avg('mental_health_index').alias('Promedio_Salud_Mental'),
-        F.avg('dropout_risk').alias('Riesgo_Desercion_Promedio'),
-        F.count('*').alias('Total_Estudiantes')
-    ).orderBy('academic_year', 'gender')
 
-stats_df.show()
+def clean_dataframe(df):
+    """Round all double-type columns to 2 decimal places."""
+    float_cols = [c for c, t in df.dtypes if t == 'double']
+    return df.select(
+        [F.round(F.col(c), 2).alias(c) if c in float_cols else F.col(c) for c in df.columns]
+    )
 
-# 6. Uso de Window Functions (Funciones de Ventana)
-# Vamos a rankear a los estudiantes con mayor estrés dentro de cada año académico
-window_spec = Window.partitionBy("academic_year").orderBy(F.col("stress_level").desc())
 
-print("\n>>> Estudiante con más estrés por cada Año Académico (Top 1):")
-df_clean.withColumn("rank_estres", F.rank().over(window_spec)) \
-    .filter(F.col("rank_estres") == 1) \
-    .select('academic_year', 'age', 'gender', 'stress_level', 'exam_pressure') \
-    .show()
+def filter_high_performers_high_burnout(df, perf_threshold=80, burnout_threshold=7):
+    """Return students with academic_performance > perf_threshold and burnout_score > burnout_threshold,
+    ordered by burnout_score descending."""
+    return df.filter(
+        (F.col('academic_performance') > perf_threshold) &
+        (F.col('burnout_score') > burnout_threshold)
+    ).select(
+        'age', 'gender', 'academic_year', 'academic_performance', 'burnout_score', 'risk_level'
+    ).orderBy(F.col('burnout_score').desc())
 
-# 7. Spark SQL (Para demostrar versatilidad)
-# Si prefieres queries tradicionales, registramos como tabla temporal
-df_clean.createOrReplaceTempView("estudiantes")
-query_sql = spark.sql("""
-    SELECT risk_level, COUNT(*) as cantidad, ROUND(AVG(sleep_hours), 2) as promedio_sueño
-    FROM estudiantes
-    GROUP BY risk_level
-    ORDER BY cantidad DESC
-""")
-print("\n>>> Distribución por Nivel de Riesgo (vía SQL):")
-query_sql.show()
 
-# Finalizar sesión
-# spark.stop()
+def compute_wellbeing_stats(df):
+    """Aggregate mental health index, dropout risk, and student count by academic_year and gender."""
+    return df.groupBy('academic_year', 'gender') \
+        .agg(
+            F.avg('mental_health_index').alias('Promedio_Salud_Mental'),
+            F.avg('dropout_risk').alias('Riesgo_Desercion_Promedio'),
+            F.count('*').alias('Total_Estudiantes')
+        ).orderBy('academic_year', 'gender')
+
+
+def rank_stress_by_year(df):
+    """Rank students by stress_level within each academic_year using a window function.
+    Returns only students ranked #1 (highest stress)."""
+    window_spec = Window.partitionBy("academic_year").orderBy(F.col("stress_level").desc())
+    return df.withColumn("rank_estres", F.rank().over(window_spec)) \
+        .filter(F.col("rank_estres") == 1) \
+        .select('academic_year', 'age', 'gender', 'stress_level', 'exam_pressure')
+
+
+def risk_level_distribution(spark, df):
+    """Use Spark SQL to compute count and average sleep hours per risk_level."""
+    df.createOrReplaceTempView("estudiantes")
+    return spark.sql("""
+        SELECT risk_level, COUNT(*) as cantidad, ROUND(AVG(sleep_hours), 2) as promedio_sueno
+        FROM estudiantes
+        GROUP BY risk_level
+        ORDER BY cantidad DESC
+    """)
+
+
+def main():
+    # 1. Configuracion de Sesion Optimizada
+    spark = create_spark_session()
+
+    # 2. Carga de Datos con Inferencia de Esquema
+    file_path = 'hdfs://localhost:9000/Tarea3/student_mental_health_burnout_1M.csv'
+    df_raw = load_data(spark, file_path)
+
+    # 3. Limpieza y Transformacion (Casteo y Redondeo)
+    df_clean = clean_dataframe(df_raw)
+
+    # 4. Analisis de "High Performers vs High Burnout"
+    print("\n>>> Top 10 Estudiantes con Alto Rendimiento y Mayor Burnout:")
+    filter_high_performers_high_burnout(df_clean).show(10)
+
+    # 5. Agregacion Avanzada por Ano Academico y Genero
+    print("\n>>> Estadisticas de Bienestar por Ano y Genero:")
+    compute_wellbeing_stats(df_clean).show()
+
+    # 6. Uso de Window Functions
+    print("\n>>> Estudiante con mas estres por cada Ano Academico (Top 1):")
+    rank_stress_by_year(df_clean).show()
+
+    # 7. Spark SQL
+    print("\n>>> Distribucion por Nivel de Riesgo (via SQL):")
+    risk_level_distribution(spark, df_clean).show()
+
+
+if __name__ == '__main__':
+    main()
